@@ -83,7 +83,7 @@ HRESULT FrameGenerator::SetD3DManager(IUnknown* manager, UINT width, UINT height
 
 	MFT_OUTPUT_STREAM_INFO info{};
 	RETURN_IF_FAILED(_converter->GetOutputStreamInfo(0, &info));
-	WINTRACE(L"FrameGenerator::EnsureRenderTarget CLSID_VideoProcessorMFT flags:0x%08X size:%u alignment:%u", info.dwFlags, info.cbSize, info.cbAlignment);
+	WINTRACE(L"FrameGenerator::SetD3DManager CLSID_VideoProcessorMFT flags:0x%08X size:%u alignment:%u", info.dwFlags, info.cbSize, info.cbAlignment);
 
 	wil::com_ptr_nothrow<IMFMediaType> inputType;
 	RETURN_IF_FAILED(MFCreateMediaType(&inputType));
