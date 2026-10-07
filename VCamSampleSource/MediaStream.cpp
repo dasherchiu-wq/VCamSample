@@ -20,8 +20,9 @@ HRESULT MediaStream::Initialize(IMFMediaSource* source, int index)
 
 	RETURN_IF_FAILED(MFCreateEventQueue(&_queue));
 
-	// set 1 here to force RGB32 only
-	auto types = wil::make_unique_cotaskmem_array<wil::com_ptr_nothrow<IMFMediaType>>(2);
+	// The OBS capture path writes RGB32 pixels. Advertising NV12 lets clients select
+	// a layout that cannot be filled with those pixels directly.
+	auto types = wil::make_unique_cotaskmem_array<wil::com_ptr_nothrow<IMFMediaType>>(1);
 
 #define NUM_IMAGE_COLS 1280 // 640
 #define NUM_IMAGE_ROWS 960 //480
@@ -114,9 +115,9 @@ HRESULT MediaStream::SetD3DManager(IUnknown* manager)
 {
 	RETURN_HR_IF_NULL(E_POINTER, manager);
 
-	// comment these 2 lines to force CPU usage
-	RETURN_IF_FAILED(_allocator->SetDirectXManager(manager));
-	RETURN_IF_FAILED(_generator.SetD3DManager(manager, NUM_IMAGE_COLS, NUM_IMAGE_ROWS));
+	// Keep samples in system memory. A DXGI-backed IMFMediaBuffer cannot be
+	// overwritten through IMFMediaBuffer::Lock, which left the generated test
+	// pattern visible after the OBS window had been captured successfully.
 	return S_OK;
 }
 
@@ -219,66 +220,101 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 	wil::com_ptr_nothrow<IMFMediaBuffer> mediaBuffer;
 	if (SUCCEEDED(outSample->GetBufferByIndex(0, &mediaBuffer)))
 	{
-		BYTE* pData = nullptr;
-		DWORD cbMaxLength = 0, cbCurrentLength = 0;
-		if (SUCCEEDED(mediaBuffer->Lock(&pData, &cbMaxLength, &cbCurrentLength)))
+		wil::com_ptr_nothrow<IMF2DBuffer2> buffer2D;
+		if (SUCCEEDED(mediaBuffer->QueryInterface(IID_PPV_ARGS(&buffer2D))))
 		{
-			// OBS uses version-specific Qt window classes and several projector titles
-			// (Program, Preview, and Source). Find any visible OBS projector by its
-			// stable title prefix so OBS upgrades and projector types keep working.
-			struct ObsProjectorSearch
+			BYTE* scanline = nullptr;
+			BYTE* bufferStart = nullptr;
+			LONG pitch = 0;
+			DWORD bufferLength = 0;
+			if (SUCCEEDED(buffer2D->Lock2DSize(MF2DBuffer_LockFlags_Write,
+				&scanline, &pitch, &bufferStart, &bufferLength)))
 			{
-				HWND window = nullptr;
-			};
-			ObsProjectorSearch search;
-			EnumWindows([](HWND hwnd, LPARAM context) -> BOOL
+				// Prefer the Preview and Program projectors. OBS source projectors use
+				// the same stable prefix, so accept one when those exact titles are absent.
+				HWND obsWindow = FindWindowW(nullptr, L"Projector - Preview");
+				if (!obsWindow)
+					obsWindow = FindWindowW(nullptr, L"Projector - Program");
+
+				if (!obsWindow)
 				{
-					wchar_t title[256]{};
-					if (IsWindowVisible(hwnd) && GetWindowTextW(hwnd, title, _countof(title)) > 0 &&
-						wcsncmp(title, L"Projector - ", 12) == 0)
+					struct ObsProjectorSearch
 					{
-						reinterpret_cast<ObsProjectorSearch*>(context)->window = hwnd;
-						return FALSE;
-					}
-					return TRUE;
-				}, reinterpret_cast<LPARAM>(&search));
-
-			HWND obsWindow = search.window;
-			if (!obsWindow)
-				obsWindow = FindWindowW(nullptr, L"Windowed Projector (Program)");
-
-			if (obsWindow)
-			{
-				RECT clientRect{};
-				if (GetClientRect(obsWindow, &clientRect) && clientRect.right > 0 && clientRect.bottom > 0)
-				{
-					HDC hdcWindow = GetDC(obsWindow);
-					HDC hdcMem = CreateCompatibleDC(hdcWindow);
-					HBITMAP hBitmap = CreateCompatibleBitmap(hdcWindow, NUM_IMAGE_COLS, NUM_IMAGE_ROWS);
-					HGDIOBJ hOld = SelectObject(hdcMem, hBitmap);
-
-					// Scale the complete OBS projector client area into the output frame.
-					SetStretchBltMode(hdcMem, HALFTONE);
-					StretchBlt(hdcMem, 0, 0, NUM_IMAGE_COLS, NUM_IMAGE_ROWS,
-						hdcWindow, 0, 0, clientRect.right, clientRect.bottom, SRCCOPY);
-
-					BITMAPINFOHEADER bi{};
-					bi.biSize = sizeof(BITMAPINFOHEADER);
-					bi.biWidth = NUM_IMAGE_COLS;
-					bi.biHeight = -NUM_IMAGE_ROWS; // Negative keeps orientation right-side up
-					bi.biPlanes = 1;
-					bi.biBitCount = 32;
-					bi.biCompression = BI_RGB;
-
-					// Feed layout bytes directly into the Media Foundation active driver buffer memory.
-					GetDIBits(hdcMem, hBitmap, 0, NUM_IMAGE_ROWS, pData, (BITMAPINFO*)&bi, DIB_RGB_COLORS);
-
-					SelectObject(hdcMem, hOld);
-					DeleteObject(hBitmap);
-					DeleteDC(hdcMem);
-					ReleaseDC(obsWindow, hdcWindow);
+						HWND window = nullptr;
+					};
+					ObsProjectorSearch search;
+					EnumWindows([](HWND hwnd, LPARAM context) -> BOOL
+						{
+							wchar_t title[256]{};
+							if (IsWindowVisible(hwnd) && GetWindowTextW(hwnd, title, _countof(title)) > 0 &&
+								wcsncmp(title, L"Projector - ", 12) == 0)
+							{
+								reinterpret_cast<ObsProjectorSearch*>(context)->window = hwnd;
+								return FALSE;
+							}
+							return TRUE;
+						}, reinterpret_cast<LPARAM>(&search));
+					obsWindow = search.window;
 				}
-			}			mediaBuffer->Unlock();
+
+				if (!obsWindow)
+					obsWindow = FindWindowW(nullptr, L"Windowed Projector (Program)");
+
+				if (obsWindow)
+				{
+					RECT clientRect{};
+					if (GetClientRect(obsWindow, &clientRect) && clientRect.right > 0 && clientRect.bottom > 0)
+					{
+						HDC hdcWindow = GetDC(obsWindow);
+						HDC hdcMem = hdcWindow ? CreateCompatibleDC(hdcWindow) : nullptr;
+
+						BITMAPINFO bitmapInfo{};
+						bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+						bitmapInfo.bmiHeader.biWidth = NUM_IMAGE_COLS;
+						bitmapInfo.bmiHeader.biHeight = -NUM_IMAGE_ROWS;
+						bitmapInfo.bmiHeader.biPlanes = 1;
+						bitmapInfo.bmiHeader.biBitCount = 32;
+						bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+						void* dibPixels = nullptr;
+						HBITMAP hBitmap = hdcMem ? CreateDIBSection(hdcWindow, &bitmapInfo,
+							DIB_RGB_COLORS, &dibPixels, nullptr, 0) : nullptr;
+						HGDIOBJ hOld = hBitmap ? SelectObject(hdcMem, hBitmap) : nullptr;
+
+						if (hOld && dibPixels)
+						{
+							SetStretchBltMode(hdcMem, HALFTONE);
+							SetBrushOrgEx(hdcMem, 0, 0, nullptr);
+							if (StretchBlt(hdcMem, 0, 0, NUM_IMAGE_COLS, NUM_IMAGE_ROWS,
+								hdcWindow, 0, 0, clientRect.right, clientRect.bottom, SRCCOPY))
+							{
+								const DWORD rowBytes = NUM_IMAGE_COLS * 4;
+								const DWORD absolutePitch = static_cast<DWORD>(pitch < 0 ? -pitch : pitch);
+								if (scanline && absolutePitch >= rowBytes &&
+									bufferLength >= rowBytes * NUM_IMAGE_ROWS)
+								{
+									for (DWORD row = 0; row < NUM_IMAGE_ROWS; row++)
+									{
+										CopyMemory(scanline + static_cast<ptrdiff_t>(row) * pitch,
+											static_cast<BYTE*>(dibPixels) + row * rowBytes, rowBytes);
+									}
+								}
+							}
+						}
+
+						if (hOld)
+							SelectObject(hdcMem, hOld);
+						if (hBitmap)
+							DeleteObject(hBitmap);
+						if (hdcMem)
+							DeleteDC(hdcMem);
+						if (hdcWindow)
+							ReleaseDC(obsWindow, hdcWindow);
+					}
+				}
+
+				buffer2D->Unlock2D();
+			}
 		}
 	}
 	// --- END OF HOOK ---
