@@ -336,45 +336,62 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 	// The source DLL is hosted by Camera Frame Server and cannot see windows on
 	// the interactive desktop. VCamSample.exe captures OBS there and publishes a
 	// complete frame through this file-backed shared mapping.
+	DWORD sharedOpenError = ERROR_SUCCESS;
+	DWORD sharedMappingError = ERROR_SUCCESS;
+	DWORD sharedViewError = ERROR_SUCCESS;
 	if (!_sharedFrame)
 	{
 		_sharedFrameFile = CreateFileW(VCAM_SHARED_FRAME_PATH, GENERIC_READ,
 			FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (_sharedFrameFile == INVALID_HANDLE_VALUE)
+			sharedOpenError = GetLastError();
 		if (_sharedFrameFile != INVALID_HANDLE_VALUE)
 		{
 			_sharedFrameMapping = CreateFileMappingW(_sharedFrameFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+			if (!_sharedFrameMapping)
+				sharedMappingError = GetLastError();
 			if (_sharedFrameMapping)
 			{
 				_sharedFrame = static_cast<SharedFrame*>(MapViewOfFile(_sharedFrameMapping,
 					FILE_MAP_READ, 0, 0, sizeof(SharedFrame)));
+				if (!_sharedFrame)
+					sharedViewError = GetLastError();
 			}
 		}
 	}
 
-	if (_sharedFrame &&
+	const bool sharedHeaderValid = _sharedFrame &&
 		_sharedFrame->magic == VCAM_SHARED_FRAME_MAGIC &&
 		_sharedFrame->version == VCAM_SHARED_FRAME_VERSION &&
 		_sharedFrame->width == NUM_IMAGE_COLS &&
 		_sharedFrame->height == NUM_IMAGE_ROWS &&
 		_sharedFrame->stride == NUM_IMAGE_COLS * 4 &&
 		_sharedFrame->capturedAtTick != 0 &&
-		GetTickCount64() - _sharedFrame->capturedAtTick < 2000)
+		GetTickCount64() - _sharedFrame->capturedAtTick < 2000;
+	HRESULT sharedGetBufferResult = E_PENDING;
+	HRESULT sharedQueryResult = E_PENDING;
+	HRESULT sharedLockResult = E_PENDING;
+	LONG sharedPitch = 0;
+	DWORD sharedBufferLength = 0;
+	bool sharedCopyCompleted = false;
+	if (sharedHeaderValid)
 	{
 		wil::com_ptr_nothrow<IMFMediaBuffer> sharedMediaBuffer;
 		wil::com_ptr_nothrow<IMF2DBuffer2> sharedBuffer2D;
-		if (SUCCEEDED(outSample->GetBufferByIndex(0, &sharedMediaBuffer)) &&
-			SUCCEEDED(sharedMediaBuffer->QueryInterface(IID_PPV_ARGS(&sharedBuffer2D))))
+		sharedGetBufferResult = outSample->GetBufferByIndex(0, &sharedMediaBuffer);
+		if (SUCCEEDED(sharedGetBufferResult))
+			sharedQueryResult = sharedMediaBuffer->QueryInterface(IID_PPV_ARGS(&sharedBuffer2D));
+		if (SUCCEEDED(sharedGetBufferResult) && SUCCEEDED(sharedQueryResult))
 		{
 			BYTE* scanline = nullptr;
 			BYTE* bufferStart = nullptr;
-			LONG pitch = 0;
-			DWORD bufferLength = 0;
-			if (SUCCEEDED(sharedBuffer2D->Lock2DSize(MF2DBuffer_LockFlags_Write,
-				&scanline, &pitch, &bufferStart, &bufferLength)))
+			sharedLockResult = sharedBuffer2D->Lock2DSize(MF2DBuffer_LockFlags_Write,
+				&scanline, &sharedPitch, &bufferStart, &sharedBufferLength);
+			if (SUCCEEDED(sharedLockResult))
 			{
 				const DWORD rowBytes = NUM_IMAGE_COLS * 4;
-				const DWORD absolutePitch = static_cast<DWORD>(pitch < 0 ? -pitch : pitch);
-				if (scanline && absolutePitch >= rowBytes && bufferLength >= rowBytes * NUM_IMAGE_ROWS)
+				const DWORD absolutePitch = static_cast<DWORD>(sharedPitch < 0 ? -sharedPitch : sharedPitch);
+				if (scanline && absolutePitch >= rowBytes && sharedBufferLength >= rowBytes * NUM_IMAGE_ROWS)
 				{
 					for (int attempt = 0; attempt < 3; attempt++)
 					{
@@ -388,18 +405,44 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 						MemoryBarrier();
 						for (DWORD row = 0; row < NUM_IMAGE_ROWS; row++)
 						{
-							CopyMemory(scanline + static_cast<ptrdiff_t>(row) * pitch,
+							CopyMemory(scanline + static_cast<ptrdiff_t>(row) * sharedPitch,
 								_sharedFrame->pixels + row * VCAM_SHARED_FRAME_STRIDE, rowBytes);
 						}
 						MemoryBarrier();
 
 						LONG sequenceAfter = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
 						if (sequenceBefore == sequenceAfter && !(sequenceAfter & 1))
+						{
+							sharedCopyCompleted = true;
 							break;
+						}
 					}
 				}
 				sharedBuffer2D->Unlock2D();
 			}
+		}
+	}
+
+	static volatile LONG sharedStatusLogged = 0;
+	if (InterlockedCompareExchange(&sharedStatusLogged, 1, 0) == 0)
+	{
+		HANDLE log = CreateFileW(L"C:\\Users\\Public\\VCamSampleReader.log", FILE_APPEND_DATA,
+			FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (log != INVALID_HANDLE_VALUE)
+		{
+			char message[768]{};
+			DWORD magic = _sharedFrame ? _sharedFrame->magic : 0;
+			LONG sequence = _sharedFrame ? InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0) : 0;
+			ULONGLONG tick = _sharedFrame ? _sharedFrame->capturedAtTick : 0;
+			int length = wsprintfA(message,
+				"file=%p map=%p view=%p openError=%lu mapError=%lu viewError=%lu magic=%08lX sequence=%ld tick=%I64u now=%I64u valid=%d getBuffer=%08lX query=%08lX lock=%08lX pitch=%ld length=%lu copied=%d\r\n",
+				_sharedFrameFile, _sharedFrameMapping, _sharedFrame, sharedOpenError, sharedMappingError,
+				sharedViewError, magic, sequence, tick, GetTickCount64(), sharedHeaderValid,
+				sharedGetBufferResult, sharedQueryResult, sharedLockResult, sharedPitch,
+				sharedBufferLength, sharedCopyCompleted);
+			DWORD written = 0;
+			WriteFile(log, message, length, &written, nullptr);
+			CloseHandle(log);
 		}
 	}
 	// --- END OF HOOK ---
