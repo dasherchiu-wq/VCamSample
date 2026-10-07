@@ -223,12 +223,27 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 		DWORD cbMaxLength = 0, cbCurrentLength = 0;
 		if (SUCCEEDED(mediaBuffer->Lock(&pData, &cbMaxLength, &cbCurrentLength)))
 		{
-			// OBS 32 uses "Projector - Program" / "Projector - Preview" and a
-			// version-specific Qt window class. Match by title so OBS upgrades do not
-			// break capture; retain the legacy title for older OBS releases.
-			HWND obsWindow = FindWindowW(nullptr, L"Projector - Program");
-			if (!obsWindow)
-				obsWindow = FindWindowW(nullptr, L"Projector - Preview");
+			// OBS uses version-specific Qt window classes and several projector titles
+			// (Program, Preview, and Source). Find any visible OBS projector by its
+			// stable title prefix so OBS upgrades and projector types keep working.
+			struct ObsProjectorSearch
+			{
+				HWND window = nullptr;
+			};
+			ObsProjectorSearch search;
+			EnumWindows([](HWND hwnd, LPARAM context) -> BOOL
+				{
+					wchar_t title[256]{};
+					if (IsWindowVisible(hwnd) && GetWindowTextW(hwnd, title, _countof(title)) > 0 &&
+						wcsncmp(title, L"Projector - ", 12) == 0)
+					{
+						reinterpret_cast<ObsProjectorSearch*>(context)->window = hwnd;
+						return FALSE;
+					}
+					return TRUE;
+				}, reinterpret_cast<LPARAM>(&search));
+
+			HWND obsWindow = search.window;
 			if (!obsWindow)
 				obsWindow = FindWindowW(nullptr, L"Windowed Projector (Program)");
 
