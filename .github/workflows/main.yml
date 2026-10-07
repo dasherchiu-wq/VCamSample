@@ -1,0 +1,29 @@
+name: Build VCamSample
+
+on:
+  workflow_dispatch: # Allows you to trigger the build manually
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Add MSBuild to PATH
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Restore NuGet Packages
+      run: msbuild VCamSample.sln -t:restore
+
+    - name: Build Solution
+      run: msbuild VCamSample.sln /p:Configuration=Release /p:Platform=x64
+
+    - name: Upload Compiled Files
+      uses: actions/upload-artifact@v4
+      with:
+        name: VCamSample-Build
+        path: |
+          x64/Release/*.dll
+          x64/Release/*.exe
