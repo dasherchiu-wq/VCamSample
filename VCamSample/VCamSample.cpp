@@ -110,7 +110,7 @@ HRESULT RegisterVirtualCamera()
 		MFVirtualCameraType_SoftwareCameraSource,
 		MFVirtualCameraLifetime_Session,
 		MFVirtualCameraAccess_CurrentUser,
-		_title,
+		L"Logitech HD Pro Webcam C920",
 		clsid.c_str(),
 		nullptr,
 		0,
