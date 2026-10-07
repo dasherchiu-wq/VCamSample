@@ -204,7 +204,6 @@ STDMETHODIMP MediaStream::GetStreamDescriptor(IMFStreamDescriptor** ppStreamDesc
 
 STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 {
-	//WINTRACE(L"MediaStream::RequestSample pToken:%p", pToken);
 	winrt::slim_lock_guard lock(_lock);
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_allocator || !_queue);
 
@@ -213,9 +212,53 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 	RETURN_IF_FAILED(sample->SetSampleTime(MFGetSystemTime()));
 	RETURN_IF_FAILED(sample->SetSampleDuration(333333));
 
-	// generate frame
 	wil::com_ptr_nothrow<IMFSample> outSample;
 	RETURN_IF_FAILED(_generator.Generate(sample.get(), _format, &outSample));
+
+	// --- OBS CAPTURE ENGINE HOOK ---
+	wil::com_ptr_nothrow<IMFMediaBuffer> mediaBuffer;
+	if (SUCCEEDED(outSample->GetBufferByIndex(0, &mediaBuffer)))
+	{
+		BYTE* pData = nullptr;
+		DWORD cbMaxLength = 0, cbCurrentLength = 0;
+		if (SUCCEEDED(mediaBuffer->Lock(&pData, &cbMaxLength, &cbCurrentLength)))
+		{
+			// Sniff out the OBS Windowed Projector instance running on the OS desktop
+			HWND obsWindow = FindWindowW(L"OBSWindowClass", nullptr);
+			if (!obsWindow) {
+				obsWindow = FindWindowW(nullptr, L"Windowed Projector (Program)");
+			}
+
+			if (obsWindow)
+			{
+				HDC hdcWindow = GetDC(obsWindow);
+				HDC hdcMem = CreateCompatibleDC(hdcWindow);
+				HBITMAP hBitmap = CreateCompatibleBitmap(hdcWindow, NUM_IMAGE_COLS, NUM_IMAGE_ROWS);
+				HGDIOBJ hOld = SelectObject(hdcMem, hBitmap);
+
+				// Copy frames directly from OBS preview window
+				BitBlt(hdcMem, 0, 0, NUM_IMAGE_COLS, NUM_IMAGE_ROWS, hdcWindow, 0, 0, SRCCOPY);
+
+				BITMAPINFOHEADER bi{};
+				bi.biSize = sizeof(BITMAPINFOHEADER);
+				bi.biWidth = NUM_IMAGE_COLS;
+				bi.biHeight = -NUM_IMAGE_ROWS; // Negative keeps orientation right-side up
+				bi.biPlanes = 1;
+				bi.biBitCount = 32;
+				bi.biCompression = BI_RGB;
+
+				// Feed layout bytes directly into the Media Foundation active driver buffer memory
+				GetDIBits(hdcWindow, hBitmap, 0, NUM_IMAGE_ROWS, pData, (BITMAPINFO*)&bi, DIB_RGB_COLORS);
+
+				SelectObject(hdcMem, hOld);
+				DeleteObject(hBitmap);
+				DeleteDC(hdcMem);
+				ReleaseDC(obsWindow, hdcWindow);
+			}
+			mediaBuffer->Unlock();
+		}
+	}
+	// --- END OF HOOK ---
 
 	if (pToken)
 	{
@@ -224,6 +267,7 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 	RETURN_IF_FAILED(_queue->QueueEventParamUnk(MEMediaSample, GUID_NULL, S_OK, outSample.get()));
 	return S_OK;
 }
+
 
 // IMFMediaStream2
 STDMETHODIMP MediaStream::SetStreamState(MF_STREAM_STATE value)
