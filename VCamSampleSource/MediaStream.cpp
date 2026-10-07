@@ -339,6 +339,23 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 	DWORD sharedOpenError = ERROR_SUCCESS;
 	DWORD sharedMappingError = ERROR_SUCCESS;
 	DWORD sharedViewError = ERROR_SUCCESS;
+	static volatile LONG sharedStatusLogged = 0;
+	HANDLE sharedLog = INVALID_HANDLE_VALUE;
+	if (InterlockedCompareExchange(&sharedStatusLogged, 1, 0) == 0)
+	{
+		sharedLog = CreateFileW(L"C:\\Users\\Public\\VCamSampleReader.log", FILE_APPEND_DATA,
+			FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+	}
+	auto logStage = [sharedLog](char stage)
+		{
+			if (sharedLog != INVALID_HANDLE_VALUE)
+			{
+				DWORD written = 0;
+				WriteFile(sharedLog, &stage, 1, &written, nullptr);
+				FlushFileBuffers(sharedLog);
+			}
+		};
+	logStage('A');
 	if (!_sharedFrame)
 	{
 		_sharedFrameFile = CreateFileW(VCAM_SHARED_FRAME_PATH, GENERIC_READ,
@@ -359,6 +376,7 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 			}
 		}
 	}
+	logStage('B');
 
 	const bool sharedHeaderValid = _sharedFrame &&
 		_sharedFrame->magic == VCAM_SHARED_FRAME_MAGIC &&
@@ -368,6 +386,7 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 		_sharedFrame->stride == NUM_IMAGE_COLS * 4 &&
 		_sharedFrame->capturedAtTick != 0 &&
 		GetTickCount64() - _sharedFrame->capturedAtTick < 2000;
+	logStage('C');
 	HRESULT sharedGetBufferResult = E_PENDING;
 	HRESULT sharedQueryResult = E_PENDING;
 	HRESULT sharedLockResult = E_PENDING;
@@ -379,20 +398,24 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 		wil::com_ptr_nothrow<IMFMediaBuffer> sharedMediaBuffer;
 		wil::com_ptr_nothrow<IMF2DBuffer2> sharedBuffer2D;
 		sharedGetBufferResult = outSample->GetBufferByIndex(0, &sharedMediaBuffer);
+		logStage('D');
 		if (SUCCEEDED(sharedGetBufferResult))
 			sharedQueryResult = sharedMediaBuffer->QueryInterface(IID_PPV_ARGS(&sharedBuffer2D));
+		logStage('E');
 		if (SUCCEEDED(sharedGetBufferResult) && SUCCEEDED(sharedQueryResult))
 		{
 			BYTE* scanline = nullptr;
 			BYTE* bufferStart = nullptr;
 			sharedLockResult = sharedBuffer2D->Lock2DSize(MF2DBuffer_LockFlags_Write,
 				&scanline, &sharedPitch, &bufferStart, &sharedBufferLength);
+			logStage('F');
 			if (SUCCEEDED(sharedLockResult))
 			{
 				const DWORD rowBytes = NUM_IMAGE_COLS * 4;
 				const DWORD absolutePitch = static_cast<DWORD>(sharedPitch < 0 ? -sharedPitch : sharedPitch);
 				if (scanline && absolutePitch >= rowBytes && sharedBufferLength >= rowBytes * NUM_IMAGE_ROWS)
 				{
+					logStage('G');
 					for (int attempt = 0; attempt < 3; attempt++)
 					{
 						LONG sequenceBefore = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
@@ -417,34 +440,14 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 							break;
 						}
 					}
+					logStage('H');
 				}
 				sharedBuffer2D->Unlock2D();
 			}
 		}
 	}
-
-	static volatile LONG sharedStatusLogged = 0;
-	if (InterlockedCompareExchange(&sharedStatusLogged, 1, 0) == 0)
-	{
-		HANDLE log = CreateFileW(L"C:\\Users\\Public\\VCamSampleReader.log", FILE_APPEND_DATA,
-			FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-		if (log != INVALID_HANDLE_VALUE)
-		{
-			char message[768]{};
-			DWORD magic = _sharedFrame ? _sharedFrame->magic : 0;
-			LONG sequence = _sharedFrame ? InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0) : 0;
-			ULONGLONG tick = _sharedFrame ? _sharedFrame->capturedAtTick : 0;
-			int length = wsprintfA(message,
-				"file=%p map=%p view=%p openError=%lu mapError=%lu viewError=%lu magic=%08lX sequence=%ld tick=%I64u now=%I64u valid=%d getBuffer=%08lX query=%08lX lock=%08lX pitch=%ld length=%lu copied=%d\r\n",
-				_sharedFrameFile, _sharedFrameMapping, _sharedFrame, sharedOpenError, sharedMappingError,
-				sharedViewError, magic, sequence, tick, GetTickCount64(), sharedHeaderValid,
-				sharedGetBufferResult, sharedQueryResult, sharedLockResult, sharedPitch,
-				sharedBufferLength, sharedCopyCompleted);
-			DWORD written = 0;
-			WriteFile(log, message, length, &written, nullptr);
-			CloseHandle(log);
-		}
-	}
+	if (sharedLog != INVALID_HANDLE_VALUE)
+		CloseHandle(sharedLog);
 	// --- END OF HOOK ---
 
 	if (pToken)
