@@ -223,39 +223,47 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 		DWORD cbMaxLength = 0, cbCurrentLength = 0;
 		if (SUCCEEDED(mediaBuffer->Lock(&pData, &cbMaxLength, &cbCurrentLength)))
 		{
-			// Sniff out the OBS Windowed Projector instance running on the OS desktop
-			HWND obsWindow = FindWindowW(L"OBSWindowClass", nullptr);
-			if (!obsWindow) {
+			// OBS 32 uses "Projector - Program" / "Projector - Preview" and a
+			// version-specific Qt window class. Match by title so OBS upgrades do not
+			// break capture; retain the legacy title for older OBS releases.
+			HWND obsWindow = FindWindowW(nullptr, L"Projector - Program");
+			if (!obsWindow)
+				obsWindow = FindWindowW(nullptr, L"Projector - Preview");
+			if (!obsWindow)
 				obsWindow = FindWindowW(nullptr, L"Windowed Projector (Program)");
-			}
 
 			if (obsWindow)
 			{
-				HDC hdcWindow = GetDC(obsWindow);
-				HDC hdcMem = CreateCompatibleDC(hdcWindow);
-				HBITMAP hBitmap = CreateCompatibleBitmap(hdcWindow, NUM_IMAGE_COLS, NUM_IMAGE_ROWS);
-				HGDIOBJ hOld = SelectObject(hdcMem, hBitmap);
+				RECT clientRect{};
+				if (GetClientRect(obsWindow, &clientRect) && clientRect.right > 0 && clientRect.bottom > 0)
+				{
+					HDC hdcWindow = GetDC(obsWindow);
+					HDC hdcMem = CreateCompatibleDC(hdcWindow);
+					HBITMAP hBitmap = CreateCompatibleBitmap(hdcWindow, NUM_IMAGE_COLS, NUM_IMAGE_ROWS);
+					HGDIOBJ hOld = SelectObject(hdcMem, hBitmap);
 
-				// Copy frames directly from OBS preview window
-				BitBlt(hdcMem, 0, 0, NUM_IMAGE_COLS, NUM_IMAGE_ROWS, hdcWindow, 0, 0, SRCCOPY);
+					// Scale the complete OBS projector client area into the output frame.
+					SetStretchBltMode(hdcMem, HALFTONE);
+					StretchBlt(hdcMem, 0, 0, NUM_IMAGE_COLS, NUM_IMAGE_ROWS,
+						hdcWindow, 0, 0, clientRect.right, clientRect.bottom, SRCCOPY);
 
-				BITMAPINFOHEADER bi{};
-				bi.biSize = sizeof(BITMAPINFOHEADER);
-				bi.biWidth = NUM_IMAGE_COLS;
-				bi.biHeight = -NUM_IMAGE_ROWS; // Negative keeps orientation right-side up
-				bi.biPlanes = 1;
-				bi.biBitCount = 32;
-				bi.biCompression = BI_RGB;
+					BITMAPINFOHEADER bi{};
+					bi.biSize = sizeof(BITMAPINFOHEADER);
+					bi.biWidth = NUM_IMAGE_COLS;
+					bi.biHeight = -NUM_IMAGE_ROWS; // Negative keeps orientation right-side up
+					bi.biPlanes = 1;
+					bi.biBitCount = 32;
+					bi.biCompression = BI_RGB;
 
-				// Feed layout bytes directly into the Media Foundation active driver buffer memory
-				GetDIBits(hdcWindow, hBitmap, 0, NUM_IMAGE_ROWS, pData, (BITMAPINFO*)&bi, DIB_RGB_COLORS);
+					// Feed layout bytes directly into the Media Foundation active driver buffer memory.
+					GetDIBits(hdcMem, hBitmap, 0, NUM_IMAGE_ROWS, pData, (BITMAPINFO*)&bi, DIB_RGB_COLORS);
 
-				SelectObject(hdcMem, hOld);
-				DeleteObject(hBitmap);
-				DeleteDC(hdcMem);
-				ReleaseDC(obsWindow, hdcWindow);
-			}
-			mediaBuffer->Unlock();
+					SelectObject(hdcMem, hOld);
+					DeleteObject(hBitmap);
+					DeleteDC(hdcMem);
+					ReleaseDC(obsWindow, hdcWindow);
+				}
+			}			mediaBuffer->Unlock();
 		}
 	}
 	// --- END OF HOOK ---
