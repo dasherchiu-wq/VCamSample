@@ -1,6 +1,7 @@
 #include "framework.h"
 #include "tools.h"
 #include "VCamSample.h"
+#include "../SharedFrame.h"
 
 #define MAX_LOADSTRING 100
 
@@ -12,6 +13,8 @@ WCHAR _title[MAX_LOADSTRING];
 WCHAR _windowClass[MAX_LOADSTRING];
 wil::com_ptr_nothrow<IMFVirtualCamera> _vcam;
 DWORD _vcamCookie;
+std::atomic<bool> _stopFramePublisher = false;
+std::thread _framePublisherThread;
 
 ATOM MyRegisterClass(HINSTANCE hInstance);
 HWND InitInstance(HINSTANCE, int);
@@ -19,6 +22,139 @@ LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK About(HWND, UINT, WPARAM, LPARAM);
 HRESULT RegisterVirtualCamera();
 HRESULT UnregisterVirtualCamera();
+void StartFramePublisher();
+void StopFramePublisher();
+
+HWND FindObsProjectorWindow()
+{
+	auto window = FindWindowW(nullptr, L"Projector - Preview");
+	if (!window)
+		window = FindWindowW(nullptr, L"Projector - Program");
+	if (window)
+		return window;
+
+	struct Search
+	{
+		HWND window = nullptr;
+	} search;
+
+	EnumWindows([](HWND hwnd, LPARAM context) -> BOOL
+		{
+			wchar_t title[256]{};
+			if (IsWindowVisible(hwnd) && GetWindowTextW(hwnd, title, _countof(title)) > 0 &&
+				wcsncmp(title, L"Projector - ", 12) == 0)
+			{
+				reinterpret_cast<Search*>(context)->window = hwnd;
+				return FALSE;
+			}
+			return TRUE;
+		}, reinterpret_cast<LPARAM>(&search));
+
+	if (search.window)
+		return search.window;
+	return FindWindowW(nullptr, L"Windowed Projector (Program)");
+}
+
+void PublishFrames()
+{
+	HANDLE file = CreateFileW(VCAM_SHARED_FRAME_PATH, GENERIC_READ | GENERIC_WRITE,
+		FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (file == INVALID_HANDLE_VALUE)
+		return;
+
+	LARGE_INTEGER fileSize{};
+	fileSize.QuadPart = sizeof(SharedFrame);
+	if (!SetFilePointerEx(file, fileSize, nullptr, FILE_BEGIN) || !SetEndOfFile(file))
+	{
+		CloseHandle(file);
+		return;
+	}
+
+	HANDLE mapping = CreateFileMappingW(file, nullptr, PAGE_READWRITE, 0, 0, nullptr);
+	auto sharedFrame = mapping ? static_cast<SharedFrame*>(MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, sizeof(SharedFrame))) : nullptr;
+	if (!sharedFrame)
+	{
+		if (mapping)
+			CloseHandle(mapping);
+		CloseHandle(file);
+		return;
+	}
+
+	ZeroMemory(sharedFrame, sizeof(SharedFrame));
+	sharedFrame->magic = VCAM_SHARED_FRAME_MAGIC;
+	sharedFrame->version = VCAM_SHARED_FRAME_VERSION;
+	sharedFrame->width = VCAM_SHARED_FRAME_WIDTH;
+	sharedFrame->height = VCAM_SHARED_FRAME_HEIGHT;
+	sharedFrame->stride = VCAM_SHARED_FRAME_STRIDE;
+
+	HDC referenceDC = GetDC(nullptr);
+	HDC memoryDC = referenceDC ? CreateCompatibleDC(referenceDC) : nullptr;
+	BITMAPINFO bitmapInfo{};
+	bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	bitmapInfo.bmiHeader.biWidth = VCAM_SHARED_FRAME_WIDTH;
+	bitmapInfo.bmiHeader.biHeight = -static_cast<LONG>(VCAM_SHARED_FRAME_HEIGHT);
+	bitmapInfo.bmiHeader.biPlanes = 1;
+	bitmapInfo.bmiHeader.biBitCount = 32;
+	bitmapInfo.bmiHeader.biCompression = BI_RGB;
+	void* dibPixels = nullptr;
+	HBITMAP bitmap = memoryDC ? CreateDIBSection(referenceDC, &bitmapInfo, DIB_RGB_COLORS, &dibPixels, nullptr, 0) : nullptr;
+	HGDIOBJ oldBitmap = bitmap ? SelectObject(memoryDC, bitmap) : nullptr;
+	if (referenceDC)
+		ReleaseDC(nullptr, referenceDC);
+
+	while (!_stopFramePublisher.load())
+	{
+		HWND projector = FindObsProjectorWindow();
+		RECT clientRect{};
+		if (projector && oldBitmap && dibPixels && GetClientRect(projector, &clientRect) &&
+			clientRect.right > 0 && clientRect.bottom > 0)
+		{
+			HDC projectorDC = GetDC(projector);
+			if (projectorDC)
+			{
+				SetStretchBltMode(memoryDC, HALFTONE);
+				SetBrushOrgEx(memoryDC, 0, 0, nullptr);
+				if (StretchBlt(memoryDC, 0, 0, VCAM_SHARED_FRAME_WIDTH, VCAM_SHARED_FRAME_HEIGHT,
+					projectorDC, 0, 0, clientRect.right, clientRect.bottom, SRCCOPY))
+				{
+					InterlockedIncrement(&sharedFrame->sequence);
+					MemoryBarrier();
+					CopyMemory(sharedFrame->pixels, dibPixels, sizeof(sharedFrame->pixels));
+					sharedFrame->capturedAtTick = GetTickCount64();
+					MemoryBarrier();
+					InterlockedIncrement(&sharedFrame->sequence);
+				}
+				ReleaseDC(projector, projectorDC);
+			}
+		}
+
+		std::this_thread::sleep_for(std::chrono::milliseconds(33));
+	}
+
+	sharedFrame->capturedAtTick = 0;
+	if (oldBitmap)
+		SelectObject(memoryDC, oldBitmap);
+	if (bitmap)
+		DeleteObject(bitmap);
+	if (memoryDC)
+		DeleteDC(memoryDC);
+	UnmapViewOfFile(sharedFrame);
+	CloseHandle(mapping);
+	CloseHandle(file);
+}
+
+void StartFramePublisher()
+{
+	_stopFramePublisher.store(false);
+	_framePublisherThread = std::thread(PublishFrames);
+}
+
+void StopFramePublisher()
+{
+	_stopFramePublisher.store(true);
+	if (_framePublisherThread.joinable())
+		_framePublisherThread.join();
+}
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow)
 {
@@ -51,6 +187,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 		winrt::init_apartment();
 		if (SUCCEEDED(MFStartup(MF_VERSION)))
 		{
+			StartFramePublisher();
 			TASKDIALOGCONFIG config{};
 			config.cbSize = sizeof(TASKDIALOGCONFIG);
 			config.hInstance = hInstance;
@@ -91,6 +228,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 				TaskDialogIndirect(&config, nullptr, nullptr, nullptr);
 			}
 
+			StopFramePublisher();
 			_vcam.reset();
 			MFShutdown();
 		}

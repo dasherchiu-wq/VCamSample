@@ -33,6 +33,9 @@
 // std
 #include <string>
 #include <format>
+#include <atomic>
+#include <thread>
+#include <chrono>
 
 // WIL, requires "Microsoft.Windows.ImplementationLibrary" nuget
 #include "wil/result.h"

@@ -6,6 +6,7 @@
 #include "FrameGenerator.h"
 #include "MediaStream.h"
 #include "MediaSource.h"
+#include "../SharedFrame.h"
 
 HRESULT MediaStream::Initialize(IMFMediaSource* source, int index)
 {
@@ -132,6 +133,21 @@ void MediaStream::Shutdown()
 	_descriptor.reset();
 	_source.reset();
 	_attributes.reset();
+	if (_sharedFrame)
+	{
+		UnmapViewOfFile(_sharedFrame);
+		_sharedFrame = nullptr;
+	}
+	if (_sharedFrameMapping)
+	{
+		CloseHandle(_sharedFrameMapping);
+		_sharedFrameMapping = nullptr;
+	}
+	if (_sharedFrameFile != INVALID_HANDLE_VALUE)
+	{
+		CloseHandle(_sharedFrameFile);
+		_sharedFrameFile = INVALID_HANDLE_VALUE;
+	}
 }
 
 // IMFMediaEventGenerator
@@ -314,6 +330,75 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 				}
 
 				buffer2D->Unlock2D();
+			}
+		}
+	}
+	// The source DLL is hosted by Camera Frame Server and cannot see windows on
+	// the interactive desktop. VCamSample.exe captures OBS there and publishes a
+	// complete frame through this file-backed shared mapping.
+	if (!_sharedFrame)
+	{
+		_sharedFrameFile = CreateFileW(VCAM_SHARED_FRAME_PATH, GENERIC_READ,
+			FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (_sharedFrameFile != INVALID_HANDLE_VALUE)
+		{
+			_sharedFrameMapping = CreateFileMappingW(_sharedFrameFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+			if (_sharedFrameMapping)
+			{
+				_sharedFrame = static_cast<SharedFrame*>(MapViewOfFile(_sharedFrameMapping,
+					FILE_MAP_READ, 0, 0, sizeof(SharedFrame)));
+			}
+		}
+	}
+
+	if (_sharedFrame &&
+		_sharedFrame->magic == VCAM_SHARED_FRAME_MAGIC &&
+		_sharedFrame->version == VCAM_SHARED_FRAME_VERSION &&
+		_sharedFrame->width == NUM_IMAGE_COLS &&
+		_sharedFrame->height == NUM_IMAGE_ROWS &&
+		_sharedFrame->stride == NUM_IMAGE_COLS * 4 &&
+		_sharedFrame->capturedAtTick != 0 &&
+		GetTickCount64() - _sharedFrame->capturedAtTick < 2000)
+	{
+		wil::com_ptr_nothrow<IMFMediaBuffer> sharedMediaBuffer;
+		wil::com_ptr_nothrow<IMF2DBuffer2> sharedBuffer2D;
+		if (SUCCEEDED(outSample->GetBufferByIndex(0, &sharedMediaBuffer)) &&
+			SUCCEEDED(sharedMediaBuffer->QueryInterface(IID_PPV_ARGS(&sharedBuffer2D))))
+		{
+			BYTE* scanline = nullptr;
+			BYTE* bufferStart = nullptr;
+			LONG pitch = 0;
+			DWORD bufferLength = 0;
+			if (SUCCEEDED(sharedBuffer2D->Lock2DSize(MF2DBuffer_LockFlags_Write,
+				&scanline, &pitch, &bufferStart, &bufferLength)))
+			{
+				const DWORD rowBytes = NUM_IMAGE_COLS * 4;
+				const DWORD absolutePitch = static_cast<DWORD>(pitch < 0 ? -pitch : pitch);
+				if (scanline && absolutePitch >= rowBytes && bufferLength >= rowBytes * NUM_IMAGE_ROWS)
+				{
+					for (int attempt = 0; attempt < 3; attempt++)
+					{
+						LONG sequenceBefore = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
+						if (sequenceBefore & 1)
+						{
+							SwitchToThread();
+							continue;
+						}
+
+						MemoryBarrier();
+						for (DWORD row = 0; row < NUM_IMAGE_ROWS; row++)
+						{
+							CopyMemory(scanline + static_cast<ptrdiff_t>(row) * pitch,
+								_sharedFrame->pixels + row * VCAM_SHARED_FRAME_STRIDE, rowBytes);
+						}
+						MemoryBarrier();
+
+						LONG sequenceAfter = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
+						if (sequenceBefore == sequenceAfter && !(sequenceAfter & 1))
+							break;
+					}
+				}
+				sharedBuffer2D->Unlock2D();
 			}
 		}
 	}

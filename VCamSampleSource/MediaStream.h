@@ -1,5 +1,7 @@
 #pragma once
 
+struct SharedFrame;
+
 struct MediaStream : winrt::implements<MediaStream, CBaseAttributes<IMFAttributes>, IMFMediaStream2, IKsControl>
 {
 public:
@@ -27,7 +29,10 @@ public:
 	MediaStream() :
 		_index(0),
 		_state(MF_STREAM_STATE_STOPPED),
-		_format(GUID_NULL)
+		_format(GUID_NULL),
+		_sharedFrameFile(INVALID_HANDLE_VALUE),
+		_sharedFrameMapping(nullptr),
+		_sharedFrame(nullptr)
 	{
 		SetBaseAttributesTraceName(L"MediaStreamAtts");
 	}
@@ -56,5 +61,8 @@ private:
 	wil::com_ptr_nothrow<IMFMediaEventQueue> _queue;
 	wil::com_ptr_nothrow<IMFMediaSource> _source;
 	wil::com_ptr_nothrow<IMFVideoSampleAllocatorEx> _allocator;
+	HANDLE _sharedFrameFile;
+	HANDLE _sharedFrameMapping;
+	SharedFrame* _sharedFrame;
 	int _index;
 };
