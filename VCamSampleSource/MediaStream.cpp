@@ -391,46 +391,30 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 		logStage('E');
 		if (SUCCEEDED(sharedGetBufferResult) && SUCCEEDED(sharedQueryResult))
 		{
-			BYTE* scanline = nullptr;
-			BYTE* bufferStart = nullptr;
-			sharedLockResult = sharedBuffer2D->Lock2DSize(MF2DBuffer_LockFlags_Write,
-				&scanline, &sharedPitch, &bufferStart, &sharedBufferLength);
 			logStage('F');
-			if (SUCCEEDED(sharedLockResult))
+			logStage('G');
+			for (int attempt = 0; attempt < 3; attempt++)
 			{
-				const DWORD rowBytes = NUM_IMAGE_COLS * 4;
-				const DWORD absolutePitch = static_cast<DWORD>(sharedPitch < 0 ? -sharedPitch : sharedPitch);
-				if (scanline && absolutePitch >= rowBytes && sharedBufferLength >= rowBytes * NUM_IMAGE_ROWS)
+				LONG sequenceBefore = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
+				if (sequenceBefore & 1)
 				{
-					logStage('G');
-					for (int attempt = 0; attempt < 3; attempt++)
-					{
-						LONG sequenceBefore = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
-						if (sequenceBefore & 1)
-						{
-							SwitchToThread();
-							continue;
-						}
-
-						MemoryBarrier();
-						for (DWORD row = 0; row < NUM_IMAGE_ROWS; row++)
-						{
-							CopyMemory(scanline + static_cast<ptrdiff_t>(row) * sharedPitch,
-								_sharedFrame->pixels + row * VCAM_SHARED_FRAME_STRIDE, rowBytes);
-						}
-						MemoryBarrier();
-
-						LONG sequenceAfter = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
-						if (sequenceBefore == sequenceAfter && !(sequenceAfter & 1))
-						{
-							sharedCopyCompleted = true;
-							break;
-						}
-					}
-					logStage('H');
+					SwitchToThread();
+					continue;
 				}
-				sharedBuffer2D->Unlock2D();
+
+				MemoryBarrier();
+				sharedLockResult = sharedBuffer2D->ContiguousCopyFrom(
+					_sharedFrame->pixels, sizeof(_sharedFrame->pixels));
+				MemoryBarrier();
+
+				LONG sequenceAfter = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
+				if (SUCCEEDED(sharedLockResult) && sequenceBefore == sequenceAfter && !(sequenceAfter & 1))
+				{
+					sharedCopyCompleted = true;
+					break;
+				}
 			}
+			logStage('H');
 		}
 	}
 	if (sharedLog != INVALID_HANDLE_VALUE)
