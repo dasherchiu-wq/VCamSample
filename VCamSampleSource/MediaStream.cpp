@@ -390,28 +390,45 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 		if (SUCCEEDED(sharedGetBufferResult) && SUCCEEDED(sharedQueryResult))
 		{
 			logStage('F');
+			BYTE* scanline = nullptr;
+			BYTE* bufferStart = nullptr;
+			LONG bufferPitch = 0;
+			DWORD bufferLength = 0;
+			sharedLockResult = sharedBuffer2D->Lock2DSize(
+				MF2DBuffer_LockFlags_Write, &scanline, &bufferPitch, &bufferStart, &bufferLength);
 			logStage('G');
-			for (int attempt = 0; attempt < 3; attempt++)
+			if (SUCCEEDED(sharedLockResult) && scanline && bufferStart)
 			{
-				LONG sequenceBefore = _sharedFrame->sequence;
-				if (sequenceBefore & 1)
+				const DWORD rowBytes = NUM_IMAGE_COLS * 4;
+				const DWORD absolutePitch = static_cast<DWORD>(bufferPitch < 0 ? -bufferPitch : bufferPitch);
+				if (absolutePitch >= rowBytes && bufferLength >= rowBytes * NUM_IMAGE_ROWS)
 				{
-					SwitchToThread();
-					continue;
-				}
+					for (int attempt = 0; attempt < 3; attempt++)
+					{
+						LONG sequenceBefore = _sharedFrame->sequence;
+						if (sequenceBefore & 1)
+						{
+							SwitchToThread();
+							continue;
+						}
 
-				MemoryBarrier();
-				sharedLockResult = sharedBuffer2D->ContiguousCopyFrom(
-					_sharedFrame->pixels, sizeof(_sharedFrame->pixels));
-				MemoryBarrier();
+						MemoryBarrier();
+						for (DWORD row = 0; row < NUM_IMAGE_ROWS; row++)
+							CopyMemory(scanline + static_cast<ptrdiff_t>(row) * bufferPitch,
+								_sharedFrame->pixels + row * rowBytes, rowBytes);
+						MemoryBarrier();
 
-				LONG sequenceAfter = _sharedFrame->sequence;
-				if (SUCCEEDED(sharedLockResult) && sequenceBefore == sequenceAfter && !(sequenceAfter & 1))
-				{
-					sharedCopyCompleted = true;
-					break;
+						LONG sequenceAfter = _sharedFrame->sequence;
+						if (sequenceBefore == sequenceAfter && !(sequenceAfter & 1))
+						{
+							sharedCopyCompleted = true;
+							break;
+						}
+					}
 				}
 			}
+			if (SUCCEEDED(sharedLockResult))
+				sharedBuffer2D->Unlock2D();
 			logStage('H');
 		}
 	}
