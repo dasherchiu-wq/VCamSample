@@ -18,6 +18,7 @@
 
 // windows
 #include <windows.h>
+#include <sddl.h>
 #include <commctrl.h>
 #include <evntprov.h>
 #include <strsafe.h>
@@ -51,4 +52,5 @@
 
 #pragma comment(lib, "mfsensorgroup")
 #pragma comment(lib, "comctl32")
+#pragma comment(lib, "advapi32")
 #pragma comment(linker,"\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")

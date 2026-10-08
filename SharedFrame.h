@@ -2,7 +2,7 @@
 
 #include <windows.h>
 
-inline constexpr wchar_t VCAM_SHARED_FRAME_PATH[] = L"C:\\Users\\Public\\VCamSampleFrame.bin";
+inline constexpr wchar_t VCAM_SHARED_FRAME_NAME[] = L"Global\\VCamSampleOBSFrameV1";
 inline constexpr DWORD VCAM_SHARED_FRAME_MAGIC = 0x4D414356; // "VCAM"
 inline constexpr DWORD VCAM_SHARED_FRAME_VERSION = 1;
 inline constexpr DWORD VCAM_SHARED_FRAME_WIDTH = 1280;

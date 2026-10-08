@@ -57,26 +57,25 @@ HWND FindObsProjectorWindow()
 
 void PublishFrames()
 {
-	HANDLE file = CreateFileW(VCAM_SHARED_FRAME_PATH, GENERIC_READ | GENERIC_WRITE,
-		FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-	if (file == INVALID_HANDLE_VALUE)
-		return;
-
-	LARGE_INTEGER fileSize{};
-	fileSize.QuadPart = sizeof(SharedFrame);
-	if (!SetFilePointerEx(file, fileSize, nullptr, FILE_BEGIN) || !SetEndOfFile(file))
+	PSECURITY_DESCRIPTOR securityDescriptor = nullptr;
+	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+		L"D:(A;;GR;;;LS)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;IU)",
+		SDDL_REVISION_1, &securityDescriptor, nullptr))
 	{
-		CloseHandle(file);
 		return;
 	}
 
-	HANDLE mapping = CreateFileMappingW(file, nullptr, PAGE_READWRITE, 0, 0, nullptr);
+	SECURITY_ATTRIBUTES securityAttributes{};
+	securityAttributes.nLength = sizeof(securityAttributes);
+	securityAttributes.lpSecurityDescriptor = securityDescriptor;
+	HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &securityAttributes, PAGE_READWRITE,
+		0, sizeof(SharedFrame), VCAM_SHARED_FRAME_NAME);
+	LocalFree(securityDescriptor);
 	auto sharedFrame = mapping ? static_cast<SharedFrame*>(MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, sizeof(SharedFrame))) : nullptr;
 	if (!sharedFrame)
 	{
 		if (mapping)
 			CloseHandle(mapping);
-		CloseHandle(file);
 		return;
 	}
 
@@ -140,7 +139,6 @@ void PublishFrames()
 		DeleteDC(memoryDC);
 	UnmapViewOfFile(sharedFrame);
 	CloseHandle(mapping);
-	CloseHandle(file);
 }
 
 void StartFramePublisher()

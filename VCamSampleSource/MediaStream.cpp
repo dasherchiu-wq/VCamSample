@@ -143,11 +143,6 @@ void MediaStream::Shutdown()
 		CloseHandle(_sharedFrameMapping);
 		_sharedFrameMapping = nullptr;
 	}
-	if (_sharedFrameFile != INVALID_HANDLE_VALUE)
-	{
-		CloseHandle(_sharedFrameFile);
-		_sharedFrameFile = INVALID_HANDLE_VALUE;
-	}
 }
 
 // IMFMediaEventGenerator
@@ -336,7 +331,6 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 	// The source DLL is hosted by Camera Frame Server and cannot see windows on
 	// the interactive desktop. VCamSample.exe captures OBS there and publishes a
 	// complete frame through this file-backed shared mapping.
-	DWORD sharedOpenError = ERROR_SUCCESS;
 	DWORD sharedMappingError = ERROR_SUCCESS;
 	DWORD sharedViewError = ERROR_SUCCESS;
 	static volatile LONG sharedStatusLogged = 0;
@@ -358,22 +352,15 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 	logStage('A');
 	if (!_sharedFrame)
 	{
-		_sharedFrameFile = CreateFileW(VCAM_SHARED_FRAME_PATH, GENERIC_READ,
-			FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-		if (_sharedFrameFile == INVALID_HANDLE_VALUE)
-			sharedOpenError = GetLastError();
-		if (_sharedFrameFile != INVALID_HANDLE_VALUE)
+		_sharedFrameMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, VCAM_SHARED_FRAME_NAME);
+		if (!_sharedFrameMapping)
+			sharedMappingError = GetLastError();
+		if (_sharedFrameMapping)
 		{
-			_sharedFrameMapping = CreateFileMappingW(_sharedFrameFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
-			if (!_sharedFrameMapping)
-				sharedMappingError = GetLastError();
-			if (_sharedFrameMapping)
-			{
-				_sharedFrame = static_cast<SharedFrame*>(MapViewOfFile(_sharedFrameMapping,
-					FILE_MAP_READ, 0, 0, sizeof(SharedFrame)));
-				if (!_sharedFrame)
-					sharedViewError = GetLastError();
-			}
+			_sharedFrame = static_cast<SharedFrame*>(MapViewOfFile(_sharedFrameMapping,
+				FILE_MAP_READ, 0, 0, sizeof(SharedFrame)));
+			if (!_sharedFrame)
+				sharedViewError = GetLastError();
 		}
 	}
 	logStage('B');
