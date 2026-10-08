@@ -400,6 +400,32 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 				sharedBufferLength >= sizeof(_sharedFrame->pixels))
 			{
 				logStage('G');
+				if (sharedLog != INVALID_HANDLE_VALUE)
+				{
+					struct CopyDiagnostic
+					{
+						ULONGLONG sharedFrame;
+						ULONGLONG sourcePixels;
+						ULONGLONG bufferStart;
+						ULONGLONG scanline;
+						DWORD bufferLength;
+						LONG pitch;
+						DWORD copyLength;
+					};
+					CopyDiagnostic diagnostic
+					{
+						reinterpret_cast<ULONGLONG>(_sharedFrame),
+						reinterpret_cast<ULONGLONG>(_sharedFrame->pixels),
+						reinterpret_cast<ULONGLONG>(bufferStart),
+						reinterpret_cast<ULONGLONG>(scanline),
+						sharedBufferLength,
+						sharedPitch,
+						sizeof(_sharedFrame->pixels)
+					};
+					DWORD written = 0;
+					WriteFile(sharedLog, &diagnostic, sizeof(diagnostic), &written, nullptr);
+					FlushFileBuffers(sharedLog);
+				}
 				for (int attempt = 0; attempt < 3; attempt++)
 				{
 					LONG sequenceBefore = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
