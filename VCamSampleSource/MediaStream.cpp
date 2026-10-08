@@ -377,8 +377,6 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 	HRESULT sharedGetBufferResult = E_PENDING;
 	HRESULT sharedQueryResult = E_PENDING;
 	HRESULT sharedLockResult = E_PENDING;
-	LONG sharedPitch = 0;
-	DWORD sharedBufferLength = 0;
 	bool sharedCopyCompleted = false;
 	if (sharedHeaderValid)
 	{
@@ -391,65 +389,30 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 		logStage('E');
 		if (SUCCEEDED(sharedGetBufferResult) && SUCCEEDED(sharedQueryResult))
 		{
-			BYTE* scanline = nullptr;
-			BYTE* bufferStart = nullptr;
-			sharedLockResult = sharedBuffer2D->Lock2DSize(MF2DBuffer_LockFlags_Write,
-				&scanline, &sharedPitch, &bufferStart, &sharedBufferLength);
 			logStage('F');
-			if (SUCCEEDED(sharedLockResult) && bufferStart &&
-				sharedBufferLength >= sizeof(_sharedFrame->pixels))
+			logStage('G');
+			for (int attempt = 0; attempt < 3; attempt++)
 			{
-				logStage('G');
-				if (sharedLog != INVALID_HANDLE_VALUE)
+				LONG sequenceBefore = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
+				if (sequenceBefore & 1)
 				{
-					struct CopyDiagnostic
-					{
-						ULONGLONG sharedFrame;
-						ULONGLONG sourcePixels;
-						ULONGLONG bufferStart;
-						ULONGLONG scanline;
-						DWORD bufferLength;
-						LONG pitch;
-						DWORD copyLength;
-					};
-					CopyDiagnostic diagnostic
-					{
-						reinterpret_cast<ULONGLONG>(_sharedFrame),
-						reinterpret_cast<ULONGLONG>(_sharedFrame->pixels),
-						reinterpret_cast<ULONGLONG>(bufferStart),
-						reinterpret_cast<ULONGLONG>(scanline),
-						sharedBufferLength,
-						sharedPitch,
-						sizeof(_sharedFrame->pixels)
-					};
-					DWORD written = 0;
-					WriteFile(sharedLog, &diagnostic, sizeof(diagnostic), &written, nullptr);
-					FlushFileBuffers(sharedLog);
+					SwitchToThread();
+					continue;
 				}
-				for (int attempt = 0; attempt < 3; attempt++)
+
+				MemoryBarrier();
+				sharedLockResult = sharedBuffer2D->ContiguousCopyFrom(
+					_sharedFrame->pixels, sizeof(_sharedFrame->pixels));
+				MemoryBarrier();
+
+				LONG sequenceAfter = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
+				if (SUCCEEDED(sharedLockResult) && sequenceBefore == sequenceAfter && !(sequenceAfter & 1))
 				{
-					LONG sequenceBefore = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
-					if (sequenceBefore & 1)
-					{
-						SwitchToThread();
-						continue;
-					}
-
-					MemoryBarrier();
-					CopyMemory(bufferStart, _sharedFrame->pixels, sizeof(_sharedFrame->pixels));
-					MemoryBarrier();
-
-					LONG sequenceAfter = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
-					if (sequenceBefore == sequenceAfter && !(sequenceAfter & 1))
-					{
-						sharedCopyCompleted = true;
-						break;
-					}
+					sharedCopyCompleted = true;
+					break;
 				}
-				logStage('H');
 			}
-			if (SUCCEEDED(sharedLockResult))
-				sharedBuffer2D->Unlock2D();
+			logStage('H');
 		}
 	}
 	if (sharedLog != INVALID_HANDLE_VALUE)
