@@ -113,9 +113,19 @@ void PublishFrames()
 			{
 				const int projectorWidth = clientRect.right;
 				const int projectorHeight = clientRect.bottom;
+				RECT windowRect{};
+				POINT clientOrigin{};
+				GetWindowRect(projector, &windowRect);
+				clientOrigin.x = 0;
+				clientOrigin.y = 0;
+				ClientToScreen(projector, &clientOrigin);
+				const int clientOffsetX = clientOrigin.x - windowRect.left;
+				const int clientOffsetY = clientOrigin.y - windowRect.top;
+				const int windowWidth = windowRect.right - windowRect.left;
+				const int windowHeight = windowRect.bottom - windowRect.top;
 				HDC projectorMemoryDC = CreateCompatibleDC(projectorDC);
 				HBITMAP projectorBitmap = projectorMemoryDC
-					? CreateCompatibleBitmap(projectorDC, projectorWidth, projectorHeight) : nullptr;
+					? CreateCompatibleBitmap(projectorDC, windowWidth, windowHeight) : nullptr;
 				HGDIOBJ oldProjectorBitmap = projectorBitmap
 					? SelectObject(projectorMemoryDC, projectorBitmap) : nullptr;
 
@@ -124,7 +134,8 @@ void PublishFrames()
 				if (oldProjectorBitmap &&
 					PrintWindow(projector, projectorMemoryDC, PW_RENDERFULLCONTENT) &&
 					StretchBlt(memoryDC, 0, 0, VCAM_SHARED_FRAME_WIDTH, VCAM_SHARED_FRAME_HEIGHT,
-						projectorMemoryDC, 0, 0, projectorWidth, projectorHeight, SRCCOPY))
+						projectorMemoryDC, clientOffsetX, clientOffsetY,
+						projectorWidth, projectorHeight, SRCCOPY))
 				{
 					InterlockedIncrement(&sharedFrame->sequence);
 					MemoryBarrier();
