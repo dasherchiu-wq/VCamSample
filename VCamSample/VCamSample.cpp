@@ -111,10 +111,20 @@ void PublishFrames()
 			HDC projectorDC = GetDC(projector);
 			if (projectorDC)
 			{
+				const int projectorWidth = clientRect.right;
+				const int projectorHeight = clientRect.bottom;
+				HDC projectorMemoryDC = CreateCompatibleDC(projectorDC);
+				HBITMAP projectorBitmap = projectorMemoryDC
+					? CreateCompatibleBitmap(projectorDC, projectorWidth, projectorHeight) : nullptr;
+				HGDIOBJ oldProjectorBitmap = projectorBitmap
+					? SelectObject(projectorMemoryDC, projectorBitmap) : nullptr;
+
 				SetStretchBltMode(memoryDC, HALFTONE);
 				SetBrushOrgEx(memoryDC, 0, 0, nullptr);
-				if (StretchBlt(memoryDC, 0, 0, VCAM_SHARED_FRAME_WIDTH, VCAM_SHARED_FRAME_HEIGHT,
-					projectorDC, 0, 0, clientRect.right, clientRect.bottom, SRCCOPY))
+				if (oldProjectorBitmap &&
+					PrintWindow(projector, projectorMemoryDC, PW_RENDERFULLCONTENT) &&
+					StretchBlt(memoryDC, 0, 0, VCAM_SHARED_FRAME_WIDTH, VCAM_SHARED_FRAME_HEIGHT,
+						projectorMemoryDC, 0, 0, projectorWidth, projectorHeight, SRCCOPY))
 				{
 					InterlockedIncrement(&sharedFrame->sequence);
 					MemoryBarrier();
@@ -123,6 +133,12 @@ void PublishFrames()
 					MemoryBarrier();
 					InterlockedIncrement(&sharedFrame->sequence);
 				}
+				if (oldProjectorBitmap)
+					SelectObject(projectorMemoryDC, oldProjectorBitmap);
+				if (projectorBitmap)
+					DeleteObject(projectorBitmap);
+				if (projectorMemoryDC)
+					DeleteDC(projectorMemoryDC);
 				ReleaseDC(projector, projectorDC);
 			}
 		}
