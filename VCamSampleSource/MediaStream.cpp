@@ -391,30 +391,39 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 		logStage('E');
 		if (SUCCEEDED(sharedGetBufferResult) && SUCCEEDED(sharedQueryResult))
 		{
+			BYTE* scanline = nullptr;
+			BYTE* bufferStart = nullptr;
+			sharedLockResult = sharedBuffer2D->Lock2DSize(MF2DBuffer_LockFlags_Write,
+				&scanline, &sharedPitch, &bufferStart, &sharedBufferLength);
 			logStage('F');
-			logStage('G');
-			for (int attempt = 0; attempt < 3; attempt++)
+			if (SUCCEEDED(sharedLockResult) && bufferStart &&
+				sharedBufferLength >= sizeof(_sharedFrame->pixels))
 			{
-				LONG sequenceBefore = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
-				if (sequenceBefore & 1)
+				logStage('G');
+				for (int attempt = 0; attempt < 3; attempt++)
 				{
-					SwitchToThread();
-					continue;
-				}
+					LONG sequenceBefore = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
+					if (sequenceBefore & 1)
+					{
+						SwitchToThread();
+						continue;
+					}
 
-				MemoryBarrier();
-				sharedLockResult = sharedBuffer2D->ContiguousCopyFrom(
-					_sharedFrame->pixels, sizeof(_sharedFrame->pixels));
-				MemoryBarrier();
+					MemoryBarrier();
+					CopyMemory(bufferStart, _sharedFrame->pixels, sizeof(_sharedFrame->pixels));
+					MemoryBarrier();
 
-				LONG sequenceAfter = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
-				if (SUCCEEDED(sharedLockResult) && sequenceBefore == sequenceAfter && !(sequenceAfter & 1))
-				{
-					sharedCopyCompleted = true;
-					break;
+					LONG sequenceAfter = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
+					if (sequenceBefore == sequenceAfter && !(sequenceAfter & 1))
+					{
+						sharedCopyCompleted = true;
+						break;
+					}
 				}
+				logStage('H');
 			}
-			logStage('H');
+			if (SUCCEEDED(sharedLockResult))
+				sharedBuffer2D->Unlock2D();
 		}
 	}
 	if (sharedLog != INVALID_HANDLE_VALUE)
