@@ -393,7 +393,7 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 			logStage('G');
 			for (int attempt = 0; attempt < 3; attempt++)
 			{
-				LONG sequenceBefore = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
+				LONG sequenceBefore = _sharedFrame->sequence;
 				if (sequenceBefore & 1)
 				{
 					SwitchToThread();
@@ -405,7 +405,7 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 					_sharedFrame->pixels, sizeof(_sharedFrame->pixels));
 				MemoryBarrier();
 
-				LONG sequenceAfter = InterlockedCompareExchange(&_sharedFrame->sequence, 0, 0);
+				LONG sequenceAfter = _sharedFrame->sequence;
 				if (SUCCEEDED(sharedLockResult) && sequenceBefore == sequenceAfter && !(sequenceAfter & 1))
 				{
 					sharedCopyCompleted = true;
